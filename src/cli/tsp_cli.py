@@ -3,7 +3,7 @@
 """
 CLI dla TSP Solvera (Zadanie 2)
 ===============================
-Rozwiązywanie problemu komiwojażera na sieci kolejowej.
+
 
 Użycie:
     python -m src.cli.tsp_cli <A> <L> <kryterium> <czas>

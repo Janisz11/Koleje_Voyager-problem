@@ -128,10 +128,11 @@ def handle_search(params):
 
 
 def handle_tsp(params):
-    a_name    = params.get("a",    [""])[0]
-    l_str     = params.get("l",    [""])[0]
-    criterion = params.get("c",    ["t"])[0]
-    time_str  = params.get("time", [""])[0]
+    a_name    = params.get("a",     [""])[0]
+    l_str     = params.get("l",     [""])[0]
+    criterion = params.get("c",     ["t"])[0]
+    time_str  = params.get("time",  [""])[0]
+    order     = params.get("order", ["opt"])[0]   # "opt" | "exact"
 
     if not a_name or not l_str or not time_str:
         return {"ok": False, "error": "Brakujące parametry TSP"}
@@ -163,51 +164,75 @@ def handle_tsp(params):
 
     t0 = time.perf_counter()
 
-    cost_matrix, _, _, _ = compute_cost_matrix(
-        node_ids, edge_map, stops, criterion, start_sec
-    )
-
-    direct = check_direct_connections(node_ids, edge_map, stops, criterion, start_sec)
-    for (i, j), dc in direct.items():
-        if dc < cost_matrix[i][j]:
-            cost_matrix[i][j] = dc
-
-    if n <= 2:
-        best_tour, best_cost = None, float("inf")
-        for perm in permutations(range(1, n)):
-            tour = [0] + list(perm) + [0]
-            c = tour_cost_matrix(tour, cost_matrix)
-            if c < best_cost:
-                best_cost = c
-                best_tour = tour[:]
-        algo_name = f"Brute-force (n={n})"
+    if order == "exact":
+       
+        exact_tour = list(range(n)) + [0]
+        infeasible = []
+        cur_time_check = start_sec
+        for k in range(len(exact_tour) - 1):
+            i, j = exact_tour[k], exact_tour[k + 1]
+            s_ids = list(station_group(node_ids[i], stops))
+            e_ids = set(station_group(node_ids[j], stops))
+            r = astar(s_ids, e_ids, cur_time_check, edge_map, criterion, stops)
+            if r is None:
+                infeasible.append(
+                    f"{stops[node_ids[i]]['name']} → {stops[node_ids[j]]['name']}"
+                )
+            else:
+                cur_time_check = r[0][r[2]][0]
+        if infeasible:
+            return {
+                "ok": False,
+                "error": "Brak połączeń na odcinkach:\n" + "\n".join(f"• {s}" for s in infeasible),
+            }
+        best_tour = exact_tour
+        algo_name = "Dokładna kolejność (wg listy)"
     else:
-        best_tour = run_tabu(n, cost_matrix, L_size, False, False, False)
-        algo_name = "Tabu Search (2b)"
-
-    for _ in range(MATRIX_ITERATIONS):
-        cost_matrix, _, _, _ = compute_cost_matrix_chained(
-            node_ids, edge_map, stops, criterion, start_sec, best_tour
+        cost_matrix, _, _, _ = compute_cost_matrix(
+            node_ids, edge_map, stops, criterion, start_sec
         )
+
+        direct = check_direct_connections(node_ids, edge_map, stops, criterion, start_sec)
         for (i, j), dc in direct.items():
             if dc < cost_matrix[i][j]:
                 cost_matrix[i][j] = dc
 
-        prev_tour = best_tour[:]
-        if n <= 4:
-            new_best, new_cost = None, float("inf")
+        if n <= 2:
+            best_tour, best_cost = None, float("inf")
             for perm in permutations(range(1, n)):
                 tour = [0] + list(perm) + [0]
                 c = tour_cost_matrix(tour, cost_matrix)
-                if c < new_cost:
-                    new_cost = c
-                    new_best = tour[:]
-            best_tour = new_best
+                if c < best_cost:
+                    best_cost = c
+                    best_tour = tour[:]
+            algo_name = f"Brute-force (n={n})"
         else:
-            best_tour = run_tabu(n, cost_matrix, L_size, False, False, False)
+            best_tour = run_tabu(n, cost_matrix, L_size, False, True, True)
+            algo_name = "Tabu Search (2b+2c+2d)"
 
-        if best_tour == prev_tour:
-            break
+        for _ in range(MATRIX_ITERATIONS):
+            cost_matrix, _, _, _ = compute_cost_matrix_chained(
+                node_ids, edge_map, stops, criterion, start_sec, best_tour
+            )
+            for (i, j), dc in direct.items():
+                if dc < cost_matrix[i][j]:
+                    cost_matrix[i][j] = dc
+
+            prev_tour = best_tour[:]
+            if n <= 4:
+                new_best, new_cost = None, float("inf")
+                for perm in permutations(range(1, n)):
+                    tour = [0] + list(perm) + [0]
+                    c = tour_cost_matrix(tour, cost_matrix)
+                    if c < new_cost:
+                        new_cost = c
+                        new_best = tour[:]
+                best_tour = new_best
+            else:
+                best_tour = run_tabu(n, cost_matrix, L_size, False, True, True)
+
+            if best_tour == prev_tour:
+                break
 
     tour_names = [stops[node_ids[i]]["name"] for i in best_tour]
     real_cost, total_xfers, all_steps, final_arrival = evaluate_tour(

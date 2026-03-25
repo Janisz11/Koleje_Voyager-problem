@@ -65,7 +65,7 @@ def astar(start_ids: list, end_ids: set, start_sec: int,
     while pq:
         f, cost, cur_time, xfers, cur_id, prev_trip, prev_block = heapq.heappop(pq)
 
-        # Pomiń jeśli ten stan jest nieaktualny
+        
         old = dist.get(cur_id)
         if old is not None:
             old_cost = old[0] if criterion == "t" else old[1] * 10_000_000 + old[0]

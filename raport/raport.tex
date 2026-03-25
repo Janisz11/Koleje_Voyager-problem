@@ -1,0 +1,316 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[polish]{babel}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{parskip}
+
+\geometry{margin=2.5cm}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue
+}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10},
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red!70!black}
+}
+
+\title{\textbf{Sztuczna Inteligencja i Inżynieria Wiedzy}\\
+\large Zadanie 1 -- Raport Implementacyjny}
+\author{}
+\date{2026}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Struktura projektu}
+% ============================================================
+
+Projekt realizuje wyszukiwanie połączeń kolejowych na danych GTFS Kolei Dolnośląskich.
+Kod źródłowy zorganizowany jest w pakiecie \texttt{src/} z podziałem na moduły:
+
+\begin{lstlisting}
+src/
+  config.py              # stale konfiguracyjne
+  algorithms/
+    astar.py             # algorytm A*
+    dijkstra.py          # algorytm Dijkstry
+    tabu_search.py       # Tabu Search (warianty 2a-2d)
+    common.py            # wspolne funkcje (relaksacja krawedzi, rekonstrukcja sciezki)
+  gtfs/
+    loader.py            # wczytywanie plikow GTFS
+    graph.py             # budowanie grafu polaczen
+    calendar.py          # filtrowanie kursow wg daty
+  cli/
+    pathfinder_cli.py    # interfejs CLI -- Zadanie 1
+    tsp_cli.py           # interfejs CLI -- Zadanie 2
+  utils/
+    time_utils.py        # konwersje czasu
+    geo.py               # odleglosc haversine
+server.py                # serwer HTTP z API REST
+gtfs_visualizer.html     # interfejs webowy
+\end{lstlisting}
+
+% ============================================================
+\section{Zadanie 1 -- Wyszukiwanie najkrótszej ścieżki}
+% ============================================================
+
+\subsection{Algorytm Dijkstry (1a)}
+
+\textbf{Plik:} \texttt{src/algorithms/dijkstra.py}\\
+\textbf{Funkcja:} \texttt{dijkstra(graph, starts, ends, criterion)}
+
+Implementacja klasycznego algorytmu Dijkstry z kolejką priorytetową (\texttt{heapq}).
+Obsługuje oba kryteria optymalizacji: czas przejazdu (\texttt{t}) oraz liczbę przesiadek
+(\texttt{p}).
+
+Uruchamiany z poziomu CLI flagą \texttt{--dijkstra}:
+\begin{lstlisting}[language=bash]
+python -m src.cli.pathfinder_cli "Wroclaw Glowny" "Jelenia Gora" t \
+    "2026-03-09 08:00" --dijkstra
+\end{lstlisting}
+
+\subsection{Algorytm A* -- kryterium czasu (1b)}
+
+\textbf{Plik:} \texttt{src/algorithms/astar.py}\\
+\textbf{Funkcja główna:} \texttt{astar(graph, starts, ends, criterion, ...)}\\
+\textbf{Heurystyka:} \texttt{heuristic\_time(node, end\_stops, gtfs\_data)}
+
+Heurystyka czasowa szacuje pozostały koszt jako odległość geograficzną (wzór haversine,
+funkcja \texttt{distance\_km} w \texttt{src/utils/geo.py}) podzieloną przez maksymalną
+prędkość pociągu (\texttt{MAX\_SPEED\_KMH} w \texttt{src/config.py}).
+Gwarantuje to dopuszczalność heurystyki -- nigdy nie przeszacowuje rzeczywistego czasu.
+
+\subsection{Algorytm A* -- kryterium przesiadek (1c)}
+
+\textbf{Plik:} \texttt{src/algorithms/astar.py}\\
+\textbf{Heurystyka:} \texttt{heuristic\_transfers(node, end\_stops, direct\_set)}\\
+\textbf{Funkcja pomocnicza:} \texttt{build\_direct\_stop\_set(graph, end\_stops)}
+
+Heurystyka przesiadkowa zwraca 0, jeśli istnieje bezpośrednie połączenie z bieżącego
+węzła do stacji docelowej (precomputed \texttt{direct\_set}), a w przeciwnym razie
+zwraca 1. Jest to heurystyka dopuszczalna -- nigdy nie zawyża liczby przesiadek.
+
+\subsection{Modyfikacje przyspieszające obliczenia (1d)}
+
+\textbf{Plik:} \texttt{src/algorithms/astar.py}
+
+Zaimplementowane usprawnienia:
+\begin{itemize}
+    \item \textbf{Wczesne zatrzymanie} (\textit{early exit}): algorytm kończy działanie
+          natychmiast po wyciągnięciu węzła docelowego z kolejki, bez eksploracji
+          pozostałych gałęzi.
+    \item \textbf{Grupowanie przystanków stacji} (\texttt{station\_group} w
+          \texttt{src/gtfs/graph.py}): zamiast jednego węzła startowego, do kolejki
+          dodawane są wszystkie perony danej stacji, co eliminuje zbędne krawędzie
+          transferowe na początku trasy.
+    \item \textbf{Pominięcie zdominowanych stanów}: jeśli węzeł zostaje wyciągnięty
+          z kolejki z kosztem wyższym niż dotychczas znane optimum dla danego przystanku,
+          jest pomijany (\texttt{if cost > dist[node]: continue}).
+    \item \textbf{Precomputed \texttt{direct\_set}} dla heurystyki przesiadkowej:
+          jednorazowo obliczany w \texttt{build\_direct\_stop\_set()} i przekazywany
+          jako parametr, zamiast obliczać przy każdym wywołaniu heurystyki.
+\end{itemize}
+
+\subsection{Interfejs CLI -- Zadanie 1}
+
+\textbf{Plik:} \texttt{src/cli/pathfinder\_cli.py}\\
+\textbf{Funkcja:} \texttt{main()} / \texttt{\_run()}\\
+\textbf{Formatowanie wyników:} \texttt{print\_results()}
+
+\begin{lstlisting}[language=bash]
+# Przyklad uzycia (A*, kryterium czasu):
+python -m src.cli.pathfinder_cli "Wroclaw Glowny" "Legnica" t "2026-03-10 07:30"
+
+# Dijkstra, kryterium przesiadek:
+python -m src.cli.pathfinder_cli "Swidnica Miasto" "Walbrzych Glowny" p \
+    "2026-03-10 09:00" --dijkstra
+\end{lstlisting}
+
+Na standardowe wyjście wypisywane są kolejne odcinki trasy (przystanek początkowy,
+końcowy, linia, czas odjazdu/przyjazdu). Na standardowe wyjście błędów -- wartość
+zminimalizowanego kryterium i czas obliczeń.
+
+% ============================================================
+\section{Zadanie 2 -- Problem komiwojażera (Tabu Search)}
+% ============================================================
+
+\subsection{Interfejs CLI -- Zadanie 2}
+
+\textbf{Plik:} \texttt{src/cli/tsp\_cli.py}\\
+\textbf{Funkcja:} \texttt{main()}
+
+\begin{lstlisting}[language=bash]
+# Przyklad uzycia (Tabu Search z aspiracja i probkowaniem):
+python -m src.cli.tsp_cli "Wroclaw Glowny" "Legnica;Jelenia Gora;Swidnica" \
+    t "2026-03-10 08:00" --2c --2d
+\end{lstlisting}
+
+Flagi wyboru wariantu Tabu Search: \texttt{--2a}, \texttt{--2b} (domyślnie),
+\texttt{--2c} (aspiracja), \texttt{--2d} (próbkowanie sąsiedztwa).
+
+\subsubsection*{Macierz kosztów}
+
+\textbf{Funkcja:} \texttt{compute\_cost\_matrix()} -- oblicza macierz kosztów
+przejazdu między wszystkimi parami przystanków za pomocą A* (optymistyczna wersja
+bez uwzględniania czasu przyjazdu).\\
+\textbf{Funkcja:} \texttt{compute\_cost\_matrix\_chained()} -- iteracyjne przeliczanie
+kosztów z rzeczywistymi czasami przyjazdów (udoskonalenie wyniku Tabu Search).
+
+\subsection{Tabu Search bez ograniczenia T (2a)}
+
+\textbf{Plik:} \texttt{src/algorithms/tabu\_search.py}\\
+\textbf{Funkcja:} \texttt{tabu\_search\_unlimited(cost\_matrix, n, criterion)}
+
+Podstawowy algorytm Tabu Search zgodny z algorytmem Knoxa. Lista tabu \texttt{T}
+rośnie nieograniczenie przez cały czas działania. Ruchem jest zamiana dwóch
+przystanków w trasie (\textit{2-opt reversal}).
+
+\subsection{Tabu Search ze zmiennym rozmiarem T (2b)}
+
+\textbf{Plik:} \texttt{src/algorithms/tabu\_search.py}\\
+\textbf{Funkcja:} \texttt{tabu\_search\_variable\_tenure(cost\_matrix, n, criterion)}
+
+Rozmiar kolejki FIFO tablicy tabu wynosi $t = \lceil |L| / 2 \rceil$, gdzie $|L|$
+to liczba przystanków pośrednich. Dla małych tras lista jest krótka (mniejsze
+zużycie pamięci), dla długich -- dłuższa (lepsza ochrona przed cyklami).
+
+\subsection{Kryterium aspiracji (2c)}
+
+\textbf{Plik:} \texttt{src/algorithms/tabu\_search.py}\\
+\textbf{Funkcja:} \texttt{tabu\_search\_core(..., use\_aspiration=True)}
+
+Aktywowane flagą \texttt{use\_aspiration=True} w \texttt{tabu\_search\_core()}.
+Kryterium aspiracji: jeśli ruch jest na liście tabu, ale prowadzi do rozwiązania
+\emph{lepszego} niż dotychczasowe najlepsze \texttt{best\_cost}, jest dopuszczany.
+
+\subsection{Próbkowanie sąsiedztwa (2d)}
+
+\textbf{Plik:} \texttt{src/algorithms/tabu\_search.py}\\
+\textbf{Funkcja:} \texttt{tabu\_search\_core(..., use\_sampling=True)}
+
+Aktywowane flagą \texttt{use\_sampling=True}. Zamiast przeszukiwać wszystkie
+$O(n^2)$ sąsiadów 2-opt, losowo próbkowana jest podzbiorowa liczba kandydatów
+(\texttt{TABU\_SAMPLE\_SIZE} z \texttt{src/config.py}). Skraca czas iteracji
+kosztem ewentualnej gorszej jakości rozwiązania.
+
+\subsection{Inicjalizacja trasy i funkcja kosztu}
+
+\textbf{Plik:} \texttt{src/algorithms/tabu\_search.py}\\
+\textbf{Funkcje:}
+\begin{itemize}
+    \item \texttt{nearest\_neighbour\_init()} -- zachłanna inicjalizacja trasą
+          metodą najbliższego sąsiada,
+    \item \texttt{random\_init()} -- losowa permutacja przystanków,
+    \item \texttt{tour\_cost\_matrix()} -- oblicza całkowity koszt trasy na
+          podstawie macierzy kosztów.
+\end{itemize}
+
+\subsection{Ewaluacja trasy}
+
+\textbf{Plik:} \texttt{src/cli/tsp\_cli.py}\\
+\textbf{Funkcja:} \texttt{evaluate\_tour()}
+
+Po znalezieniu optymalnej kolejności przystanków, \texttt{evaluate\_tour()} symuluje
+rzeczywistą podróż z uwzględnieniem rzeczywistych czasów odjazdu/przyjazdu, kursów
+oraz przesiadek. Obsługuje też bezpośrednie przejazdy (\texttt{check\_direct\_connections},
+\texttt{find\_continuation}).
+
+% ============================================================
+\section{Wczytywanie danych GTFS i budowanie grafu}
+% ============================================================
+
+\textbf{Plik:} \texttt{src/gtfs/loader.py}\\
+\textbf{Funkcja:} \texttt{load\_gtfs(path)} -- wczytuje wszystkie pliki GTFS do
+słowników Pythona.
+
+\textbf{Plik:} \texttt{src/gtfs/graph.py}\\
+\textbf{Funkcja:} \texttt{build\_graph(gtfs\_data, start\_date, num\_days, ...)} --
+buduje skierowany graf zależny od czasu:
+\begin{itemize}
+    \item krawędzie kursów ze \texttt{stop\_times.txt} (dla aktywnych serwisów),
+    \item krawędzie transferowe między przystankami tej samej stacji
+          (\texttt{\_add\_transfer\_edges()}).
+\end{itemize}
+
+\textbf{Plik:} \texttt{src/gtfs/calendar.py}\\
+\textbf{Funkcja:} \texttt{is\_service\_active(service\_id, date, ...)} -- sprawdza,
+czy dany kurs jest aktywny w podanej dacie, uwzględniając wyjątki z
+\texttt{calendar\_dates.txt}.
+
+Wyszukiwanie przystanków po nazwie: \texttt{find\_stop()} w \texttt{src/gtfs/graph.py}
+-- dopasowanie dokładne, z sufiksem,,główny'', prefiksowe, a następnie podciąg nazwy.
+
+% ============================================================
+\section{Biblioteki zewnętrzne}
+% ============================================================
+
+\begin{itemize}
+    \item \textbf{Python 3.x} -- język implementacji.
+    \item \textbf{heapq} (biblioteka standardowa) -- kolejka priorytetowa w
+          algorytmach Dijkstry i A*.
+    \item \textbf{csv} (biblioteka standardowa) -- wczytywanie plików GTFS.
+    \item \textbf{datetime} (biblioteka standardowa) -- obsługa dat i kalendarza kursów.
+    \item \textbf{math} (biblioteka standardowa) -- obliczenia trygonometryczne
+          (haversine).
+    \item \textbf{random} (biblioteka standardowa) -- losowe próbkowanie sąsiedztwa
+          w Tabu Search.
+    \item \textbf{http.server} (biblioteka standardowa) -- serwer HTTP
+          (\texttt{server.py}).
+    \item \textbf{itertools} (biblioteka standardowa) -- generowanie permutacji
+          (brute force dla $n \le 4$ w \texttt{tsp\_cli.py}).
+\end{itemize}
+
+Projekt nie korzysta z zewnętrznych bibliotek spoza biblioteki standardowej Pythona.
+
+% ============================================================
+\section{Napotkane problemy}
+% ============================================================
+
+\begin{itemize}
+    \item \textbf{Czasy przekraczające 24h w GTFS} -- plik \texttt{stop\_times.txt}
+          zawiera czasy w formacie \texttt{HH:MM:SS}, gdzie \texttt{HH} może
+          przekraczać 23 (np. \texttt{25:10:00} oznacza 1:10 następnego dnia).
+          Rozwiązano to przez konwersję wszystkich czasów do sekund od północy
+          (\texttt{time\_to\_sec()} w \texttt{src/utils/time\_utils.py}) i obsługę
+          wartości $> 86400$.
+
+    \item \textbf{Hierarchia stacji w GTFS} -- przystanki mogą być peronami
+          (podrzędnymi) lub stacjami (nadrzędnymi). Krawędzie transferowe muszą
+          łączyć \emph{wszystkie} perony tej samej stacji, nie tylko pary o
+          identycznym \texttt{stop\_id}. Obsłużono to w \texttt{\_add\_transfer\_edges()}.
+
+    \item \textbf{Dopuszczalność heurystyki A*} -- heurystyka musi być dopuszczalna
+          (nie przeszacowywać). Dla kryterium czasu użyto odległości geograficznej
+          podzielonej przez \texttt{MAX\_SPEED\_KMH}. Dla kryterium przesiadek wartość
+          0/1 jest zawsze dopuszczalna.
+
+    \item \textbf{Macierz kosztów a rzeczywiste czasy} -- optymistyczna macierz
+          kosztów (A* bez uwzględniania łańcucha czasu) może być nieadekwatna po
+          ustaleniu kolejności przystanków. Rozwiązano to przez iteracyjne przeliczanie
+          macierzy z rzeczywistymi czasami przyjazdów (\texttt{compute\_cost\_matrix\_chained()}).
+
+    \item \textbf{Identyfikacja przesiadek} -- zmiana \texttt{trip\_id} nie zawsze
+          oznacza przesiadkę (ten sam pojazd może kontynuować kurs pod innym
+          identyfikatorem \texttt{block\_id}). Obsłużono to w \texttt{find\_continuation()}
+          i \texttt{check\_direct\_connections()}.
+\end{itemize}
+
+\end{document}
